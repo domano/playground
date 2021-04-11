@@ -39,7 +39,9 @@ func main() {
 
 	fileServer := http.FileServer(NewFileSystemConnector(fileSystem))
 
-	http.ListenAndServe(":8080", fileServer)
+	if err := http.ListenAndServe(":8080", fileServer); err != nil {
+		panic(err)
+	}
 
 	<-done
 
@@ -77,7 +79,7 @@ type FileConnector struct {
 // Readdir reads all contents regardless of count given, due to the underlying billy.Filesystem. It will not return more then count slice entries.
 func (f FileConnector) Readdir(count int) ([]fs.FileInfo, error) {
 	fi, err := f.Filesystem.ReadDir(f.string)
-	return fi[0:count], err
+	return fi[0:count], err // only return an array with as many elements as in "count"
 }
 
 func (f FileConnector) Stat() (fs.FileInfo, error) {
