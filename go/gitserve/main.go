@@ -56,6 +56,14 @@ func NewFileSystemConnector(mfs billy.Filesystem) FileSystemConnector {
 }
 
 func (f FileSystemConnector) Open(name string) (http.File, error) {
+	if name == "/" {
+		name = "index.html"
+	} else {
+		valid := fs.ValidPath(name)
+		if !valid {
+			return nil, fs.ErrNotExist
+		}
+	}
 	file, err := f.mfs.Open(name)
 	return FileConnector{f.mfs, file, name}, err
 }
