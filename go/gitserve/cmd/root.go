@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"github.com/domano/playground/go/gitserve/internal"
 	"github.com/go-git/go-git/v5"
@@ -9,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/crypto/ssh/terminal"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -33,7 +36,7 @@ var rootCmd = &cobra.Command{
 		}
 		url = args[0]
 
-		// if we do not have something like a protocol specifier in front or it does not look like a ssh-url we append https:// as a hack
+		// if we do not have something like a protocol specifier in front or it does not look like a ssh-url we append https:// as a default
 		match, err := regexp.Match(".*(://|@.*:).*", []byte(url))
 		if err != nil {
 			cmd.PrintErr(err)
@@ -43,32 +46,11 @@ var rootCmd = &cobra.Command{
 			url = "https://" + url
 		}
 
-		usr, _ := user.Current()
-		dir := usr.HomeDir
-		if privateKey == "~" {
-			// In case of "~", which won't be caught by the "else if"
-			privateKey = dir
-		} else if strings.HasPrefix(privateKey, "~/") {
-			// Use strings.HasPrefix so we don't match paths like
-			// "/something/~/something/"
-			privateKey = filepath.Join(dir, privateKey[2:])
-		}
-
-		var pw string
-		if privateKeyPassword {
-			pw, err = password()
-			if err != nil {
-				panic(err)
-			}
-		}
-		publicKeys, err := ssh.NewPublicKeysFromFile("git", privateKey, pw)
-		if err != nil {
-			panic(err)
-		}
+		pk := getPublicKey()
 
 		opts := git.CloneOptions{
 			URL:               url,
-			Auth:              publicKeys,
+			Auth:              pk,
 			RemoteName:        "",
 			ReferenceName:     "",
 			SingleBranch:      false,
@@ -83,6 +65,45 @@ var rootCmd = &cobra.Command{
 
 		internal.Serve(&opts)
 	},
+}
+
+func getPublicKey() *ssh.PublicKeys {
+	usr, _ := user.Current()
+	dir := usr.HomeDir
+	if privateKey == "~" {
+		// In case of "~", which won't be caught by the "else if"
+		privateKey = dir
+	} else if strings.HasPrefix(privateKey, "~/") {
+		// Use strings.HasPrefix so we don't match paths like
+		// "/something/~/something/"
+		privateKey = filepath.Join(dir, privateKey[2:])
+	}
+
+	var pw string
+	if privateKeyPassword {
+		var err error // we define the err variable since := would introduce a seperate pw variable in this scope
+		pw, err = password()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	publicKeys, err := checkIncorrectPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return publicKeys
+}
+
+func checkIncorrectPassword(publicKeys *ssh.PublicKeys, err error) (*ssh.PublicKeys, error) {
+	if errors.Is(err, x509.IncorrectPasswordError) {
+		fmt.Println("Incorrect Password, please try again!")
+		pw, err := password()
+		if err != nil {
+			return nil, err
+		}
+		return checkIncorrectPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
+	}
+	return publicKeys, err
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -128,7 +149,7 @@ func initConfig() {
 }
 
 func password() (string, error) {
-	fmt.Print("Enter Password: ")
+	fmt.Println("Enter Password: ")
 	bytePassword, err := terminal.ReadPassword(syscall.Stdin)
 	if err != nil {
 		return "", err
