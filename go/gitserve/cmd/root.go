@@ -1,16 +1,28 @@
 package cmd
 
 import (
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"github.com/domano/playground/go/gitserve/internal"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/crypto/ssh/terminal"
+	"log"
 	"os"
+	"os/user"
+	"path/filepath"
 	"regexp"
+	"strings"
+	"syscall"
 )
 
-var cfgFile string
+var privateKey string
+var privateKeyPassword bool
+var url string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -22,9 +34,9 @@ var rootCmd = &cobra.Command{
 			cmd.Help()
 			return
 		}
-		url := args[0]
+		url = args[0]
 
-		// if we do not have something like a protocol specifier in front or it does not look like a ssh-url we append https:// as a hack
+		// if we do not have something like a protocol specifier in front or it does not look like a ssh-url we append https:// as a default
 		match, err := regexp.Match(".*(://|@.*:).*", []byte(url))
 		if err != nil {
 			cmd.PrintErr(err)
@@ -33,8 +45,65 @@ var rootCmd = &cobra.Command{
 		if !match {
 			url = "https://" + url
 		}
-		internal.Serve(url) // TODO: add auth for ssh clone
+
+		pk := getPublicKey()
+
+		opts := git.CloneOptions{
+			URL:               url,
+			Auth:              pk,
+			RemoteName:        "",
+			ReferenceName:     "",
+			SingleBranch:      false,
+			NoCheckout:        false,
+			Depth:             0,
+			RecurseSubmodules: 0,
+			Progress:          nil,
+			Tags:              0,
+			InsecureSkipTLS:   false,
+			CABundle:          nil,
+		}
+
+		internal.Serve(&opts)
 	},
+}
+
+func getPublicKey() *ssh.PublicKeys {
+	usr, _ := user.Current()
+	dir := usr.HomeDir
+	if privateKey == "~" {
+		// In case of "~", which won't be caught by the "else if"
+		privateKey = dir
+	} else if strings.HasPrefix(privateKey, "~/") {
+		// Use strings.HasPrefix so we don't match paths like
+		// "/something/~/something/"
+		privateKey = filepath.Join(dir, privateKey[2:])
+	}
+
+	var pw string
+	if privateKeyPassword {
+		var err error // we define the err variable since := would introduce a seperate pw variable in this scope
+		pw, err = password()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	publicKeys, err := checkIncorrectPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return publicKeys
+}
+
+func checkIncorrectPassword(publicKeys *ssh.PublicKeys, err error) (*ssh.PublicKeys, error) {
+	if errors.Is(err, x509.IncorrectPasswordError) {
+		fmt.Println("Incorrect Password, please try again!")
+		pw, err := password()
+		if err != nil {
+			return nil, err
+		}
+		return checkIncorrectPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
+	}
+	return publicKeys, err
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -51,15 +120,16 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.gitserve.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&privateKey, "privateKey", "k", "~/.ssh/id_rsa", "Path to SSH private key. By default ~/.ssh/id_rsa will be used if a ssh:// repo is passed.")
+	rootCmd.PersistentFlags().BoolVarP(&privateKeyPassword, "privateKeyPassword", "p", false, "Is the SSH Key password protected?")
 
 }
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	if cfgFile != "" {
+	if privateKey != "" {
 		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
+		viper.SetConfigFile(privateKey)
 	} else {
 		// Find home directory.
 		home, err := homedir.Dir()
@@ -76,4 +146,15 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+func password() (string, error) {
+	fmt.Println("Enter Password: ")
+	bytePassword, err := terminal.ReadPassword(syscall.Stdin)
+	if err != nil {
+		return "", err
+	}
+
+	password := string(bytePassword)
+	return strings.TrimSpace(password), nil
 }
