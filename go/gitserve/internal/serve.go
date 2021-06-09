@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"github.com/go-git/go-billy/v5"
 	"github.com/go-git/go-billy/v5/memfs"
 	"github.com/go-git/go-git/v5"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-func Serve(opts *git.CloneOptions, interval time.Duration) {
+func Serve(ctx context.Context, ctxCancel context.CancelFunc, opts *git.CloneOptions, interval time.Duration) {
 	// Listen for SIGINT and SIGTERM
 	sigs := make(chan os.Signal, 1)
 
@@ -27,8 +28,6 @@ func Serve(opts *git.CloneOptions, interval time.Duration) {
 	if err != nil {
 		panic(err)
 	}
-
-	worktree, err := repo.Worktree()
 
 	fileServer := http.FileServer(NewFileSystemConnector(fileSystem))
 
@@ -44,40 +43,57 @@ func Serve(opts *git.CloneOptions, interval time.Duration) {
 
 	log.Printf("server running")
 
+	go keepRepoUpdated(ctx, repo, opts, interval)
+
 	<-sigs
 	log.Printf("shutting down server")
 
-	ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctxShutDown, _ := context.WithTimeout(ctx, 5*time.Second) // We will use the parents cancellation func instead
 	defer func() {
-		cancel()
+		ctxCancel() // We trigger the parents' cancellation func so as to notify the worktree update routine of the cancellation too
 	}()
-
-	// TODO: this uses the wrong context, since ctxShutDown is used for graceful shutdowns - pull it up so that the updates actually happen
-	go func(ctx context.Context, w *git.Worktree, cloneOptions *git.CloneOptions, interval time.Duration) {
-		for ctxShutDown.Err() == nil {
-			log.Println("Updated Worktree")
-			opts := pullOpts(cloneOptions)
-			err := w.Pull(opts)
-			if err != nil {
-				log.Printf("Could not pull in new changes: %s\n", err)
-			} else {
-				log.Println("Updated the worktree")
-			}
-
-			select {
-			case <-ctxShutDown.Done():
-				return
-			case <-time.After(interval):
-				continue
-			}
-		}
-	}(ctxShutDown, worktree, opts, interval)
 
 	if err = server.Shutdown(ctxShutDown); err != nil {
 		log.Fatalf("server Shutdown Failed:%+s", err)
 	}
 
 	log.Printf("server exited properly")
+}
+
+func keepRepoUpdated(ctx context.Context, repo *git.Repository, cloneOptions *git.CloneOptions, interval time.Duration) {
+	worktree, err := repo.Worktree()
+	if errors.Is(err, git.ErrIsBareRepository) {
+		log.Println("Can not update worktrees for bare repositories, no updates will take place")
+		return
+	}
+	if err != nil {
+		log.Fatalf("Encountered an unexpected error whilst getting the worktree for the repo: %s\n", err)
+	}
+	fetchOptions := fetchOpts(cloneOptions)
+	pullOptions := pullOpts(cloneOptions)
+
+	for ctx.Err() == nil {
+		err := repo.FetchContext(ctx, fetchOptions)
+		if !errors.Is(err, git.NoErrAlreadyUpToDate) && err != nil {
+			log.Printf("Could not fetch remote: %s\n", err)
+		}
+		if err == nil { // We should only try to update the worktree if there was no git.NoErrAlreadyUpToDate
+			log.Println("Updating Worktree")
+			err := worktree.PullContext(ctx, pullOptions)
+			if err != nil {
+				log.Printf("Could not pull in new changes: %s\n", err)
+			} else {
+				log.Println("Updated the worktree")
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+			continue
+		}
+	}
 }
 
 func pullOpts(opts *git.CloneOptions) *git.PullOptions {
@@ -92,6 +108,19 @@ func pullOpts(opts *git.CloneOptions) *git.PullOptions {
 		Force:             true,
 		InsecureSkipTLS:   opts.InsecureSkipTLS,
 		CABundle:          opts.CABundle,
+	}
+}
+
+func fetchOpts(opts *git.CloneOptions) *git.FetchOptions {
+	return &git.FetchOptions{
+		RemoteName:      opts.RemoteName,
+		Depth:           opts.Depth,
+		Auth:            opts.Auth,
+		Progress:        opts.Progress,
+		Tags:            opts.Tags,
+		Force:           true,
+		InsecureSkipTLS: opts.InsecureSkipTLS,
+		CABundle:        opts.CABundle,
 	}
 }
 

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -26,12 +27,16 @@ var privateKeyPassword bool
 var updateInterval time.Duration
 var url string
 
+// TODO: make this work for all subcommands
+var baseCtx, baseCtxCancel = context.WithCancel(context.Background())
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "gitserve",
 	Short: "Serve any git repository from memory via http.",
 	Long:  `Serve any git repository from memory via http.`,
 	Run: func(cmd *cobra.Command, args []string) {
+
 		if len(args) != 1 {
 			cmd.Help()
 			return
@@ -65,7 +70,7 @@ var rootCmd = &cobra.Command{
 			CABundle:          nil,
 		}
 
-		internal.Serve(&opts, updateInterval)
+		internal.Serve(baseCtx, baseCtxCancel, &opts, updateInterval)
 	},
 }
 
