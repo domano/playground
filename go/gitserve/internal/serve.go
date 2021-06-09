@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-func Serve(opts *git.CloneOptions) {
+func Serve(opts *git.CloneOptions, interval time.Duration) {
 	// Listen for SIGINT and SIGTERM
 	sigs := make(chan os.Signal, 1)
 
@@ -23,10 +23,12 @@ func Serve(opts *git.CloneOptions) {
 
 	storage := memory.NewStorage()
 	fileSystem := memfs.New()
-	_, err := git.Clone(storage, fileSystem, opts)
+	repo, err := git.Clone(storage, fileSystem, opts)
 	if err != nil {
 		panic(err)
 	}
+
+	worktree, err := repo.Worktree()
 
 	fileServer := http.FileServer(NewFileSystemConnector(fileSystem))
 
@@ -50,11 +52,47 @@ func Serve(opts *git.CloneOptions) {
 		cancel()
 	}()
 
+	// TODO: this uses the wrong context, since ctxShutDown is used for graceful shutdowns - pull it up so that the updates actually happen
+	go func(ctx context.Context, w *git.Worktree, cloneOptions *git.CloneOptions, interval time.Duration) {
+		for ctxShutDown.Err() == nil {
+			log.Println("Updated Worktree")
+			opts := pullOpts(cloneOptions)
+			err := w.Pull(opts)
+			if err != nil {
+				log.Printf("Could not pull in new changes: %s\n", err)
+			} else {
+				log.Println("Updated the worktree")
+			}
+
+			select {
+			case <-ctxShutDown.Done():
+				return
+			case <-time.After(interval):
+				continue
+			}
+		}
+	}(ctxShutDown, worktree, opts, interval)
+
 	if err = server.Shutdown(ctxShutDown); err != nil {
 		log.Fatalf("server Shutdown Failed:%+s", err)
 	}
 
 	log.Printf("server exited properly")
+}
+
+func pullOpts(opts *git.CloneOptions) *git.PullOptions {
+	return &git.PullOptions{
+		RemoteName:        opts.RemoteName,
+		ReferenceName:     opts.ReferenceName,
+		SingleBranch:      opts.SingleBranch,
+		Depth:             opts.Depth,
+		Auth:              opts.Auth,
+		RecurseSubmodules: opts.RecurseSubmodules,
+		Progress:          opts.Progress,
+		Force:             true,
+		InsecureSkipTLS:   opts.InsecureSkipTLS,
+		CABundle:          opts.CABundle,
+	}
 }
 
 type FileSystemConnector struct {
