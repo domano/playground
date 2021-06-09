@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func Serve(ctx context.Context, ctxCancel context.CancelFunc, opts *git.CloneOptions, interval time.Duration) {
+func Serve(ctx context.Context, ctxCancel context.CancelFunc, opts *git.CloneOptions, interval time.Duration, addr string) {
 	// Listen for SIGINT and SIGTERM
 	sigs := make(chan os.Signal, 1)
 
@@ -36,7 +36,7 @@ func Serve(ctx context.Context, ctxCancel context.CancelFunc, opts *git.CloneOpt
 		Handler: fileServer,
 	}
 	go func() {
-		if err := http.ListenAndServe(":8080", fileServer); err != nil {
+		if err := http.ListenAndServe(addr, fileServer); err != nil {
 			log.Fatal(err)
 		}
 	}()

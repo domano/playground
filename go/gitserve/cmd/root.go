@@ -5,8 +5,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"github.com/domano/playground/go/gitserve/internal"
-	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/cobra"
@@ -16,14 +14,13 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
 )
 
 var privateKey string
-var privateKeyPassword bool
+var addr string
 var updateInterval time.Duration
 var url string
 
@@ -34,83 +31,7 @@ var baseCtx, baseCtxCancel = context.WithCancel(context.Background())
 var rootCmd = &cobra.Command{
 	Use:   "gitserve",
 	Short: "Serve any git repository from memory via http.",
-	Long:  `Serve any git repository from memory via http.`,
-	Run: func(cmd *cobra.Command, args []string) {
-
-		if len(args) != 1 {
-			cmd.Help()
-			return
-		}
-		url = args[0]
-
-		// if we do not have something like a protocol specifier in front or it does not look like a ssh-url we append https:// as a default
-		match, err := regexp.Match(".*(://|@.*:).*", []byte(url))
-		if err != nil {
-			cmd.PrintErr(err)
-			return
-		}
-		if !match {
-			url = "https://" + url
-		}
-
-		pk := getPublicKey()
-
-		opts := git.CloneOptions{
-			URL:               url,
-			Auth:              pk,
-			RemoteName:        "",
-			ReferenceName:     "",
-			SingleBranch:      false,
-			NoCheckout:        false,
-			Depth:             0,
-			RecurseSubmodules: 0,
-			Progress:          nil,
-			Tags:              0,
-			InsecureSkipTLS:   false,
-			CABundle:          nil,
-		}
-
-		internal.Serve(baseCtx, baseCtxCancel, &opts, updateInterval)
-	},
-}
-
-func getPublicKey() *ssh.PublicKeys {
-	usr, _ := user.Current()
-	dir := usr.HomeDir
-	if privateKey == "~" {
-		// In case of "~", which won't be caught by the "else if"
-		privateKey = dir
-	} else if strings.HasPrefix(privateKey, "~/") {
-		// Use strings.HasPrefix so we don't match paths like
-		// "/something/~/something/"
-		privateKey = filepath.Join(dir, privateKey[2:])
-	}
-
-	var pw string
-	if privateKeyPassword {
-		var err error // we define the err variable since := would introduce a seperate pw variable in this scope
-		pw, err = password()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	publicKeys, err := checkIncorrectPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
-	if err != nil {
-		log.Fatal(err)
-	}
-	return publicKeys
-}
-
-func checkIncorrectPassword(publicKeys *ssh.PublicKeys, err error) (*ssh.PublicKeys, error) {
-	if errors.Is(err, x509.IncorrectPasswordError) {
-		fmt.Println("Incorrect Password, please try again!")
-		pw, err := password()
-		if err != nil {
-			return nil, err
-		}
-		return checkIncorrectPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
-	}
-	return publicKeys, err
+	Long:  `Serve any git repository from memory via http whilst keeping it up to date.`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -123,13 +44,9 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
-
-	rootCmd.PersistentFlags().StringVarP(&privateKey, "privateKey", "k", "~/.ssh/id_rsa", "Path to SSH private key. By default ~/.ssh/id_rsa will be used if a ssh:// repo is passed.")
-	rootCmd.PersistentFlags().BoolVarP(&privateKeyPassword, "privateKeyPassword", "p", false, "Is the SSH Key password protected?")
-	rootCmd.PersistentFlags().DurationVarP(&updateInterval, "updateInterval", "u", 5*time.Minute, "Interval that determines how often we check and pull in changes from git. The Default is 5*time.Minute")
+	rootCmd.PersistentFlags().StringVarP(&privateKey, "privateKey", "k", "~/.ssh/id_rsa", "For SSH cloning, fetching and pulling you can pass a private key.")
+	rootCmd.PersistentFlags().StringVarP(&addr, "address", "a", ":8080", "Address to use for the server.")
+	rootCmd.PersistentFlags().DurationVarP(&updateInterval, "updateInterval", "u", 5*time.Minute, "Interval that determines how often we check and pull in changes from git.")
 
 }
 
@@ -154,6 +71,37 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+func getPublicKey(privateKey string) *ssh.PublicKeys {
+	usr, _ := user.Current()
+	dir := usr.HomeDir
+	if privateKey == "~" {
+		// In case of "~", which won't be caught by the prefix case
+		privateKey = dir
+	}
+	if strings.HasPrefix(privateKey, "~/") {
+		// Use strings.HasPrefix so we don't match paths like
+		// "/something/~/something/"
+		privateKey = filepath.Join(dir, privateKey[2:])
+	}
+
+	publicKeys, err := checkPassword(ssh.NewPublicKeysFromFile("git", privateKey, "pw"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return publicKeys
+}
+
+func checkPassword(publicKeys *ssh.PublicKeys, err error) (*ssh.PublicKeys, error) {
+	if errors.Is(err, x509.IncorrectPasswordError) || (err != nil && strings.Contains(err.Error(), "password")) { // hacky catch-all check for passwords since not all possible password errors are properly typed
+		pw, err := password()
+		if err != nil {
+			return nil, err
+		}
+		return checkPassword(ssh.NewPublicKeysFromFile("git", privateKey, pw))
+	}
+	return publicKeys, err
 }
 
 func password() (string, error) {
