@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -18,11 +19,16 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 )
 
 var privateKey string
 var privateKeyPassword bool
+var updateInterval time.Duration
 var url string
+
+// TODO: make this work for all subcommands
+var baseCtx, baseCtxCancel = context.WithCancel(context.Background())
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -30,6 +36,7 @@ var rootCmd = &cobra.Command{
 	Short: "Serve any git repository from memory via http.",
 	Long:  `Serve any git repository from memory via http.`,
 	Run: func(cmd *cobra.Command, args []string) {
+
 		if len(args) != 1 {
 			cmd.Help()
 			return
@@ -63,7 +70,7 @@ var rootCmd = &cobra.Command{
 			CABundle:          nil,
 		}
 
-		internal.Serve(&opts)
+		internal.Serve(baseCtx, baseCtxCancel, &opts, updateInterval)
 	},
 }
 
@@ -122,6 +129,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVarP(&privateKey, "privateKey", "k", "~/.ssh/id_rsa", "Path to SSH private key. By default ~/.ssh/id_rsa will be used if a ssh:// repo is passed.")
 	rootCmd.PersistentFlags().BoolVarP(&privateKeyPassword, "privateKeyPassword", "p", false, "Is the SSH Key password protected?")
+	rootCmd.PersistentFlags().DurationVarP(&updateInterval, "updateInterval", "u", 5*time.Minute, "Interval that determines how often we check and pull in changes from git. The Default is 5*time.Minute")
 
 }
 
